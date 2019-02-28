@@ -1,9 +1,11 @@
 
 cloudbreak-config() {
-  : ${BRIDGE_IP:=$(docker run --rm --name=cbreak_cbd_bridgeip --label cbreak.sidekick=true alpine sh -c 'ip ro | grep default | cut -d" " -f 3')}
-  env-import PRIVATE_IP $BRIDGE_IP
-  env-import DOCKER_MACHINE ""
-  compose-config
+  if is_macos; then
+    env-import PRIVATE_IP 127.0.0.1
+  else
+    : ${BRIDGE_IP:=$(docker run --rm --name=cbreak_cbd_bridgeip --label cbreak.sidekick=true alpine sh -c 'ip ro | grep default | cut -d" " -f 3')}
+    env-import PRIVATE_IP $BRIDGE_IP
+  fi
   cloudbreak-conf-tags
   cloudbreak-conf-images
   cloudbreak-conf-capabilities
@@ -16,22 +18,16 @@ cloudbreak-config() {
   cloudbreak-conf-rest-client
   cloudbreak-conf-ui
   cloudbreak-conf-java
-  cloudbreak-conf-consul
   cloudbreak-conf-vault
   cloudbreak-conf-caas
   migrate-config
 }
 
-compose-config() {
-    declare desc="Defines docker compose variables"
-
-    env-import COMPOSE_TLS_VERSION "TLSv1_2"
-}
 
 cloudbreak-conf-caas() {
     declare desc="Defines CAAS related configs"
 
-    env-import CAAS_URL "caas-mock.service.consul:$CAAS_MOCK_BIND_PORT"
+    env-import CAAS_URL "caas-mock:8080"
 }
 
 cloudbreak-conf-tags() {
@@ -39,7 +35,7 @@ cloudbreak-conf-tags() {
 
     env-import DOCKER_TAG_ALPINE 3.8
     env-import DOCKER_TAG_HAVEGED 1.1.0
-    env-import DOCKER_TAG_TRAEFIK v1.6.6-alpine
+    env-import DOCKER_TAG_TRAEFIK v1.7.9-alpine
     env-import DOCKER_TAG_CONSUL 1.4.0
     env-import DOCKER_TAG_REGISTRATOR v7
     env-import DOCKER_TAG_UAA 3.6.5-pgupdate
@@ -56,7 +52,6 @@ cloudbreak-conf-tags() {
     env-import DOCKER_TAG_LOGROTATE 1.0.1
     env-import DOCKER_TAG_CBD_SMARTSENSE 0.13.4
 
-    env-import DOCKER_IMAGE_CONSUL consul
     env-import DOCKER_IMAGE_CAAS_MOCK hortonworks/cloudbreak-mock-caas
     env-import DOCKER_IMAGE_CLOUDBREAK hortonworks/cloudbreak
     env-import DOCKER_IMAGE_CLOUDBREAK_WEB hortonworks/hdc-web
@@ -65,19 +60,8 @@ cloudbreak-conf-tags() {
     env-import DOCKER_IMAGE_CLOUDBREAK_DATALAKE hortonworks/cloudbreak-datalake
     env-import DOCKER_IMAGE_CBD_SMARTSENSE hortonworks/cbd-smartsense
 
-    env-import CB_DEFAULT_SUBSCRIPTION_ADDRESS http://uluwatu.service.consul:3000/notifications
+    env-import CB_DEFAULT_SUBSCRIPTION_ADDRESS http://uluwatu:3000/notifications
 
-}
-
-cloudbreak-conf-consul() {
-    [[ "$cloudbreakConfConsulExecuted" ]] && return
-
-    env-import DOCKER_CONSUL_OPTIONS ""
-    if ! [[ $DOCKER_CONSUL_OPTIONS =~ .*recursor.* ]]; then
-        DOCKER_CONSUL_OPTIONS="$DOCKER_CONSUL_OPTIONS $(consul-recursors <(cat /etc/resolv.conf 2>/dev/null || echo) ${BRIDGE_IP} $(docker-ip))"
-    fi
-    debug "DOCKER_CONSUL_OPTIONS=$DOCKER_CONSUL_OPTIONS"
-    cloudbreakConfConsulExecuted=1
 }
 
 cloudbreak-conf-images() {
@@ -117,7 +101,7 @@ cloudbreak-conf-db() {
     env-import DATALAKE_DB_ENV_SCHEMA "public"
     env-import DATALAKE_HBM2DDL_STRATEGY "validate"
 
-    env-import IDENTITY_DB_URL "${COMMON_DB}.service.consul:5432"
+    env-import IDENTITY_DB_URL "${COMMON_DB}:5432"
     env-import IDENTITY_DB_NAME "uaadb"
     env-import IDENTITY_DB_USER "postgres"
     env-import IDENTITY_DB_PASS ""
@@ -174,7 +158,6 @@ cloudbreak-conf-defaults() {
     fi;
     env-import CB_AUDIT_FILE_ENABLED false
     env-import CB_KAFKA_BOOTSTRAP_SERVERS ""
-    env-import CB_LOCAL_DEV_BIND_ADDR "192.168.64.1"
     env-import ADDRESS_RESOLVING_TIMEOUT 120000
     env-import CB_UI_MAX_WAIT 400
     env-import CB_HOST_DISCOVERY_CUSTOM_DOMAIN ""
@@ -199,6 +182,12 @@ cloudbreak-conf-defaults() {
     env-import PUBLIC_HTTPS_PORT 443
 
     env-import CB_LOCAL_DEV "false"
+
+    if [[ "$CB_LOCAL_DEV" == "true" ]]; then
+        env-import CLOUDBREAK_URL "http://host.docker.internal:9091"
+    else
+        env-import CLOUDBREAK_URL "http://cloudbreak:8080"
+    fi
 }
 
 cloudbreak-conf-autscale() {
@@ -234,7 +223,7 @@ cloudbreak-conf-ui() {
     env-import ULU_HOST_ADDRESS  "https://$PUBLIC_IP:$PUBLIC_HTTPS_PORT"
     env-import CB_HOST_ADDRESS  "http://$PUBLIC_IP"
     env-import ULU_NODE_TLS_REJECT_UNAUTHORIZED "0"
-    env-import ULU_SUBSCRIBE_TO_NOTIFICATIONS "false"
+    env-import ULU_SUBSCRIBE_TO_NOTIFICATIONS "true"
 }
 
 cloudbreak-conf-java() {
@@ -362,7 +351,7 @@ zones:
      - ${PRIVATE_IP}
      - ${PUBLIC_IP}
      - node1.node.dc1.consul
-     - identity.service.consul
+     - identity
 
 oauth:
   client:
@@ -435,49 +424,4 @@ util-local-dev() {
     dockerCompose stop --timeout ${DOCKER_STOP_TIMEOUT} cloudbreak 2> /dev/null || :
     dockerCompose stop --timeout ${DOCKER_STOP_TIMEOUT} periscope 2> /dev/null || :
     dockerCompose stop --timeout ${DOCKER_STOP_TIMEOUT} datalake 2> /dev/null || :
-
-    if is_macos; then
-        docker rm -f cloudbreak-proxy 2> /dev/null || :
-        docker rm -f periscope-proxy 2> /dev/null || :
-        docker rm -f datalake-proxy 2> /dev/null || :
-
-        debug starting an ambassador to be registered as cloudbreak.service.consul.
-        debug "all traffic to ambassador will be proxied to localhost"
-
-        docker run -d \
-            --name cloudbreak-proxy \
-            -p 8080:8080 \
-            -e PORT=8080 \
-            -e SERVICE_NAME=cloudbreak \
-            -e SERVICE_8080_NAME=cloudbreak \
-            -l traefik.port=8080 \
-            -l traefik.frontend.rule=PathPrefix:/cb/ \
-            -l traefik.backend=cloudbreak-backend \
-            -l traefik.frontend.priority=10 \
-            hortonworks/ambassadord:$DOCKER_TAG_AMBASSADOR $CB_LOCAL_DEV_BIND_ADDR:$port &> /dev/null
-
-        docker run -d \
-            --name periscope-proxy \
-            -p 8085:8085 \
-            -e PORT=8085 \
-            -e SERVICE_NAME=periscope \
-            -e SERVICE_8085_NAME=periscope \
-            -l traefik.port=8085 \
-            -l traefik.frontend.rule=PathPrefix:/as/ \
-            -l traefik.backend=periscope-backend \
-            -l traefik.frontend.priority=10 \
-            hortonworks/ambassadord:$DOCKER_TAG_AMBASSADOR $CB_LOCAL_DEV_BIND_ADDR:8085 &> /dev/null
-
-        docker run -d \
-            --name datalake-proxy \
-            -p 8086:8086 \
-            -e PORT=8086 \
-            -e SERVICE_NAME=datalake \
-            -e SERVICE_8086_NAME=datalake \
-            -l traefik.port=8086 \
-            -l traefik.frontend.rule=PathPrefix:/dl/ \
-            -l traefik.backend=datalake-backend \
-            -l traefik.frontend.priority=10 \
-            hortonworks/ambassadord:$DOCKER_TAG_AMBASSADOR $CB_LOCAL_DEV_BIND_ADDR:8086 &> /dev/null
-    fi
 }
